@@ -62,11 +62,12 @@ jobs:
       - name: Build Rust HTML Documentation
         run: |
           cargo doc --no-deps --document-private-items
-          # Redirect root URL directly to the engine docs
           echo '<meta http-equiv="refresh" content="0; url=game_wasm/index.html">' > target/doc/index.html
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3
@@ -108,7 +109,6 @@ jobs:
           name: edge-worker-wasm
           path: game_wasm_opt.wasm
 
-      # Deploys directly to Cloudflare Workers if secrets exist
       - name: Deploy to Cloudflare Workers
         if: env.CLOUDFLARE_API_TOKEN != '' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: cloudflare/wrangler-action@v3
@@ -192,7 +192,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24' # Updated to Node 24
           registry-url: 'https://npm.pkg.github.com'
           scope: '@${{ github.repository_owner }}'
 
@@ -206,17 +206,14 @@ jobs:
           name: sdk-sources
           path: sdks
 
-      # A. Publish to GitHub Packages (npm)
       - name: Publish TypeScript SDK
         run: |
           cd sdks/ts
-          # Update package name to match GitHub Packages scope
           sed -i 's|"@game-engine/sdk"|"@${{ github.repository_owner }}/game-engine-sdk"|g' package.json
           npm publish || echo "Package already exists"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # B. Publish to GitHub Packages (NuGet)
       - name: Pack and Publish C# SDK
         run: |
           cd sdks/csharp
