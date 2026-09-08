@@ -1,0 +1,117 @@
+name: Multi-Platform Engine & SDK Build
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  # =====================================================
+  # 1. AUTO SDK GENERATION
+  # =====================================================
+  generate-sdks:
+    name: Generate Multi-Language SDKs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Typeshare CLI
+        run: cargo install typeshare-cli
+
+      - name: Run SDK Generator Binary
+        run: cargo run --bin generate_sdks
+
+      - name: Upload Generated SDKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-multi-lang-sdks
+          path: sdks/
+
+  # =====================================================
+  # 2. WASM WITH RELAXED SIMD (Cloudflare Edge)
+  # =====================================================
+  build-wasm:
+    name: WebAssembly (Edge Worker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Binaryen (wasm-opt)
+        run: sudo apt-get install -y binaryen
+
+      - name: Compile WASM with SIMD
+        run: |
+          RUSTFLAGS="-C target-feature=+simd128,+relaxed-simd" cargo build --target wasm32-unknown-unknown --release
+
+      - name: Optimize WASM Size with wasm-opt
+        run: |
+          wasm-opt -O3 target/wasm32-unknown-unknown/release/game_wasm.wasm -o game_wasm_opt.wasm
+
+      - name: Upload WASM Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-worker-wasm
+          path: game_wasm_opt.wasm
+
+  # =====================================================
+  # 3. ANDROID NATIVE (.so with NDK)
+  # =====================================================
+  build-android:
+    name: Android Native (aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Build Android ARM64 Library
+        run: |
+          cargo ndk -t arm64-v8a build --release
+
+      - name: Upload Android Shared Library
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64-lib
+          path: target/aarch64-linux-android/release/libgame_wasm.so
+
+  # =====================================================
+  # 4. PC / NATIVE PLATFORMS (Matrix)
+  # =====================================================
+  build-desktop:
+    name: Desktop Native (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: linux-x86_64-lib
+            output_file: target/x86_64-unknown-linux-gnu/release/libgame_wasm.so
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: windows-x86_64-dll
+            output_file: target/x86_64-pc-windows-msvc/release/game_wasm.dll
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Compile Native Shared Library
+        run: cargo build --target ${{ matrix.target }} --release
+
+      - name: Upload Desktop Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.output_file }}
