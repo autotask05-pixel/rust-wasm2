@@ -1,4 +1,4 @@
-name: Multi-Platform Engine & SDK Build
+name: Engine Pipeline & Multi-Platform Distribution
 
 on:
   push:
@@ -9,12 +9,15 @@ on:
 
 permissions:
   contents: write
+  packages: write
+  pages: write
+  id-token: write
 
 jobs:
   # =====================================================
-  # 1. AUTO SDK GENERATION
+  # 1. SDK GENERATION & PACKAGE MANIFESTS
   # =====================================================
-  generate-sdks:
+  build-sdks:
     name: Generate Multi-Language SDKs
     runs-on: ubuntu-latest
     steps:
@@ -24,23 +27,61 @@ jobs:
       - name: Install Typeshare CLI
         run: cargo install typeshare-cli
 
-      - name: Run SDK Generator Binary
+      - name: Run Generator Binary
         run: cargo run --bin generate_sdks
 
-      - name: Zip SDKs
+      - name: Zip SDKs Bundle
         run: zip -r sdks.zip sdks/
 
-      - name: Upload Generated SDKs
+      - name: Upload SDK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: game-multi-lang-sdks
+          name: game-sdks
           path: sdks.zip
 
+      - name: Upload Unpacked SDKs (For Publishing)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-sources
+          path: sdks/
+
   # =====================================================
-  # 2. WASM WITH RELAXED SIMD (Cloudflare Edge)
+  # 2. AUTO-DOCS DEPLOYMENT (GitHub Pages)
   # =====================================================
-  build-wasm:
-    name: WebAssembly (Edge Worker)
+  docs:
+    name: Build & Publish Live Documentation
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Rust HTML Documentation
+        run: |
+          cargo doc --no-deps --document-private-items
+          # Redirect root URL directly to the engine docs
+          echo '<meta http-equiv="refresh" content="0; url=game_wasm/index.html">' > target/doc/index.html
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # =====================================================
+  # 3. WASM (SIMD) BUILD & CLOUDFLARE WORKER DEPLOYMENT
+  # =====================================================
+  build-and-deploy-wasm:
+    name: WASM Build & Cloudflare Deployment
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,22 +94,32 @@ jobs:
           VERSION="version_122"
           curl -sSL "https://github.com/WebAssembly/binaryen/releases/download/${VERSION}/binaryen-${VERSION}-x86_64-linux.tar.gz" | sudo tar -xz --strip-components=1 -C /usr/local
 
-      - name: Compile WASM with SIMD
+      - name: Compile WASM with Relaxed SIMD
         run: |
           RUSTFLAGS="-C target-feature=+simd128,+relaxed-simd" cargo build --target wasm32-unknown-unknown --release
 
-      - name: Optimize WASM Size with wasm-opt
+      - name: Optimize WASM with wasm-opt
         run: |
           wasm-opt --all-features -O3 target/wasm32-unknown-unknown/release/game_wasm.wasm -o game_wasm_opt.wasm
 
-      - name: Upload WASM Binary
+      - name: Upload WASM Artifact
         uses: actions/upload-artifact@v4
         with:
           name: edge-worker-wasm
           path: game_wasm_opt.wasm
 
+      # Deploys directly to Cloudflare Workers if secrets exist
+      - name: Deploy to Cloudflare Workers
+        if: env.CLOUDFLARE_API_TOKEN != '' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        uses: cloudflare/wrangler-action@v3
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: deploy
+
   # =====================================================
-  # 3. ANDROID NATIVE (.so with NDK)
+  # 4. CROSS-PLATFORM NATIVE ENGINES (.so, .dll)
   # =====================================================
   build-android:
     name: Android Native (aarch64)
@@ -87,17 +138,14 @@ jobs:
           cargo ndk -t arm64-v8a build --release
           cp target/aarch64-linux-android/release/libgame_wasm.so libgame_wasm_android_arm64.so
 
-      - name: Upload Android Shared Library
+      - name: Upload Android Artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-arm64-lib
           path: libgame_wasm_android_arm64.so
 
-  # =====================================================
-  # 4. PC / NATIVE PLATFORMS (Matrix)
-  # =====================================================
   build-desktop:
-    name: Desktop Native (${{ matrix.target }})
+    name: Desktop (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -119,38 +167,78 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Compile Native Shared Library
+      - name: Compile Native Binary
         run: cargo build --target ${{ matrix.target }} --release
 
       - name: Rename Artifact
         shell: bash
         run: cp ${{ matrix.output_file }} ${{ matrix.renamed_file }}
 
-      - name: Upload Desktop Binary
+      - name: Upload Desktop Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.renamed_file }}
 
   # =====================================================
-  # 5. AUTOMATED GITHUB RELEASE (Only runs on Tags)
+  # 5. PUBLISH PACKAGES TO REGISTRIES (npm & NuGet)
+  # =====================================================
+  publish-packages:
+    name: Publish SDKs (npm & NuGet)
+    needs: [build-sdks]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@${{ github.repository_owner }}'
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download SDK Sources
+        uses: actions/download-artifact@v4
+        with:
+          name: sdk-sources
+          path: sdks
+
+      # A. Publish to GitHub Packages (npm)
+      - name: Publish TypeScript SDK
+        run: |
+          cd sdks/ts
+          # Update package name to match GitHub Packages scope
+          sed -i 's|"@game-engine/sdk"|"@${{ github.repository_owner }}/game-engine-sdk"|g' package.json
+          npm publish || echo "Package already exists"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # B. Publish to GitHub Packages (NuGet)
+      - name: Pack and Publish C# SDK
+        run: |
+          cd sdks/csharp
+          dotnet pack -c Release -o out
+          dotnet nuget push out/*.nupkg --api-key ${{ secrets.GITHUB_TOKEN }} --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" --skip-duplicate
+
+  # =====================================================
+  # 6. OFFICIAL GITHUB RELEASE
   # =====================================================
   create-release:
-    name: Publish Release Artifacts
-    needs: [generate-sdks, build-wasm, build-android, build-desktop]
+    name: Publish Official Release
+    needs: [build-sdks, build-and-deploy-wasm, build-android, build-desktop]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all build artifacts
+      - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
           path: release_assets
           merge-multiple: true
-
-      - name: Display release assets
-        run: ls -lh release_assets/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -164,32 +252,3 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
-
-          
-deploy-docs:
-    name: Build & Publish Live Docs
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Build Rust HTML Docs
-        run: cargo doc --no-deps --document-private-items
-
-      - name: Setup GitHub Pages
-        uses: actions/configure-pages@v4
-
-      - name: Upload Docs Artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: target/doc/game_wasm/
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
