@@ -13,6 +13,9 @@ permissions:
   pages: write
   id-token: write
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
 jobs:
   # =====================================================
   # 1. SDK GENERATION & PACKAGE MANIFESTS
@@ -51,7 +54,8 @@ jobs:
   docs:
     name: Build & Publish Live Documentation
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    # Deploy docs on main or on version tags
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -62,12 +66,13 @@ jobs:
       - name: Build Rust HTML Documentation
         run: |
           cargo doc --no-deps --document-private-items
+          # Add .nojekyll so GitHub doesn't try to parse Rust docs with Jekyll
+          touch target/doc/.nojekyll
+          # Redirect root URL directly to the engine docs
           echo '<meta http-equiv="refresh" content="0; url=game_wasm/index.html">' > target/doc/index.html
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3
@@ -192,7 +197,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24' # Updated to Node 24
+          node-version: '24'
           registry-url: 'https://npm.pkg.github.com'
           scope: '@${{ github.repository_owner }}'
 
