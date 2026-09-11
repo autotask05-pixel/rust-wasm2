@@ -185,45 +185,6 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.renamed_file }}
 
-  # =====================================================
-  # 5. PUBLISH PACKAGES TO REGISTRIES (npm & NuGet)
-  # =====================================================
-  publish-packages:
-    name: Publish SDKs (npm & NuGet)
-    needs: [build-sdks]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@${{ github.repository_owner }}'
-
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Download SDK Sources
-        uses: actions/download-artifact@v4
-        with:
-          name: sdk-sources
-          path: sdks
-
-      - name: Publish TypeScript SDK
-        run: |
-          cd sdks/ts
-          sed -i 's|"@game-engine/sdk"|"@${{ github.repository_owner }}/game-engine-sdk"|g' package.json
-          npm publish || echo "Package already exists"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pack and Publish C# SDK
-        run: |
-          cd sdks/csharp
-          dotnet pack -c Release -o out
-          dotnet nuget push out/*.nupkg --api-key ${{ secrets.GITHUB_TOKEN }} --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" --skip-duplicate
 
   # =====================================================
   # 6. OFFICIAL GITHUB RELEASE
